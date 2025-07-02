@@ -1,25 +1,14 @@
+#define TINY_GSM_MODEM_SIM800
+
 //Inclusão das bibliotecas
 #include <Wire.h>
 #include "MPU9250.h"
 #include "MAX30105.h"
 #include "heartRate.h"
 #include <TinyGPS++.h>
-#include <HTTPClient.h>
-#include <WiFi.h> //Temporario, será substituído pelo GSM
+#include <TinyGsmClient.h>
 
-//Define o endereço do acelerometro e do Max30102
-#define endeAce 0x68
-#define endeMax 0x57
-
-//Criação das classes
-MPU9250 senAcele = MPU9250(Wire, endeAce);
-MAX30105 senFreqEOxi;
-
-//Status dos sensores
-int statusAce;
-int statusMax;
-
-// Variáveis de comunicação BT e HTTP
+//Variáveis de comunicação HTTP
 long intervaloMsgs = 0;
 int oxigenacao = 0;
 int batimento = 0;
@@ -28,36 +17,47 @@ String dataHora = "01/01/2025 10:04:00";
 String coordenadas = "";
 String altitude = "";
 //const char* serverName = "http://localhost:5218/api/dados"; //Local
-const char* serverName = "https://servidoresp32api-hehwc0d3enaae6bt.canadacentral-01.azurewebsites.net/api/dados"; //Servidor
-const char* ssid = "Brocco";
-const char* password = "2213150810";
+const char* serverName = "http://checkered-same-amount.glitch.me/api/dados"; //Servidor
 
 //Variáveis do GPS
-#define RXD2 16
-#define TXD2 17
-HardwareSerial neogps(1);
+#define RXD1 4
+#define TXD1 5
+HardwareSerial neogps(2);
 TinyGPSPlus gps;
 
-//Variáveis para calcular frequência cardiaca e oximetria
-unsigned long lastBeatTime = 0;  // Armazena o tempo do último batimento
-int beatBPM = 0;                 // Variável para armazenar o BPM
-long prevIRValue = 0;            // Valor anterior de IR
-bool isPeakDetected = false;     // Flag para indicar se um pico foi detectado
-int threshold = 10000;           // Defina um limiar para detectar um batimento
-bool firstBeat = true;           // Variável para controlar o primeiro batimento
-long irValues[10];               // Armazena as últimas 10 leituras de IR
+//Variáveis do GSM
+#define RXD2 16
+#define TXD2 17
+HardwareSerial sim800(1);
+TinyGsm modem(sim800);
+TinyGsmClient client(modem);
+
+//Variáveis frequência cardiaca e oximetria
+#define endeMax 0x57                            // Endereço
+MAX30105 senFreqEOxi;                           // Classe
+int statusAce;
+unsigned long lastBeatTime = 0;                 // Armazena o tempo do último batimento
+int beatBPM = 0;                                // Variável para armazenar o BPM
+long prevIRValue = 0;                           // Valor anterior de IR
+bool isPeakDetected = false;                    // Flag para indicar se um pico foi detectado
+int threshold = 10000;                          // Defina um limiar para detectar um batimento
+bool firstBeat = true;                          // Variável para controlar o primeiro batimento
+long irValues[10];                              // Armazena as últimas 10 leituras de IR
 int irIndex = 0;
-long dcRed = 0, dcIR = 0;        // Variáveis para armazenar as componentes DC
-long acRed = 0, acIR = 0;        // Variáveis para armazenar as componentes AC
+long dcRed = 0, dcIR = 0;                       // Variáveis para armazenar as componentes DC
+long acRed = 0, acIR = 0;                       // Variáveis para armazenar as componentes AC
 long prevRedOxiValue = 0, prevIROxiValue = 0;
 long minRed = 0, maxRed = 0;
 long minIR = 0, maxIR = 0;
 bool firstCycle = true;
 
-//Variáveis para armazenar dados do acelerometro
+//Variáveis do acelerometro
+#define endeAce 0x68                            // Endereço
+MPU9250 senAcele = MPU9250(Wire, endeAce);      // Classe
 float prevAccelX = 0;
 float prevAccelY = 0;
 float prevAccelZ = 0;
+int statusMax;
 
 void LeAcelerometro() {
   // Lê o acelerometro
@@ -205,28 +205,6 @@ void LeGPS() {
   }
 }
 
-void EnviaProtocoloHTTP(String json) { 
-  if (WiFi.status() == WL_CONNECTED) 
-  {
-    HTTPClient http;
-
-    http.begin(serverName);
-    http.addHeader("Content-Type", "application/json");
-
-    int httpResponseCode = http.POST(json);
-
-    if (httpResponseCode > 0) {
-      String response = http.getString();
-      //Serial.println("Resposta do servidor: " + response);
-    } 
-    else {
-      Serial.println(F("Erro ao enviar POST"));
-    }
-
-    http.end();
-  }
-}
-
 void setup(void) {
   Wire.begin();
 
@@ -250,24 +228,28 @@ void setup(void) {
 
   //Inicializa o sensor de frequência e oximetria
   statusMax = senFreqEOxi.begin(Wire, I2C_SPEED_FAST);
-  if (statusMax < 0)
-  {
+  if (statusMax < 0) {
     Serial.println("MAX30102 não foi encontrado. Verifique a ligação/alimentação.");
     Serial.print("Status: ");
     Serial.println(statusMax);
     while (1);
   }
 
-  //Inicializa o WiFi
-  WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) 
-  {
-    delay(500);
-  }
-  Serial.println("Conectado no WiFi!");
+  //Inicializa GPS e GSM
+  neogps.begin(9600, SERIAL_8N1, RXD1, TXD1);
+											 
+  sim800.begin(9600, SERIAL_8N1, RXD2, TXD2);
+  Serial.println("Reiniciando modem...");
+  
+  modem.restart();
 
-  //Inicializa GPS
-  neogps.begin(9600, SERIAL_8N1, RXD2, TXD2);
+  //Conecta à rede GPRS (Vivo)
+  if (!modem.gprsConnect("zap.vivo.com.br", "vivo", "vivo")) {
+    Serial.println("Erro ao conectar GPRS");
+  } else {
+    Serial.println("Modem GSM conectado!");
+  }
+  
 
   //Configura o sensor de frequência e oximetria
   byte ledBrightness = 80;                //Opções: 0=Off to 255=50mA - Este valor determina a intensidade da luz emitida pelos LEDs. //70
@@ -276,6 +258,7 @@ void setup(void) {
   int sampleRate = 400;                   //Opções: 50, 100, 200, 400, 800, 1000, 1600, 3200 - Isso define quantas amostras por segundo são coletadas pelo sensor. //400
   int pulseWidth = 215;                   //Opções: 69, 118, 215, 411 - Isso define a duração do pulso de luz emitido pelos LED // 69
   int adcRange = 16384;                   //Opções: 2048, 4096, 8192, 16384 - Para converter o sinal analógico (luz refletida) em dados digitais. //16384
+
   senFreqEOxi.setup(ledBrightness, sampleAverage, ledMode, sampleRate, pulseWidth, adcRange);
 }
 
@@ -290,10 +273,29 @@ void loop() {
     String json;
     batimento = beatBPM;
     //Envia dados HTTP
+				
     json = "{\"Id\": \"1\", \"Oxigenacao\": \"" + (String)oxigenacao + "\", \"Freq\": \"" + (String)batimento + "\", \"Queda\": \"" + (String)queda + "\", \"DataHora\": \"" + dataHora + "\", \"Coordenadas\": \"" + coordenadas + "\"}";
+											 
     Serial.println(json);
-    EnviaProtocoloHTTP(json);
 
+    if (client.connect("checkered-same-amount.glitch.me", 80)) {
+      client.println("POST /api/dados HTTP/1.1");
+      client.println("Host: checkered-same-amount.glitch.me");
+      client.println("Content-Type: application/json");
+      client.println("User-Agent: ESP32-SIM800L"); // Alguns servidores exigem isso
+      client.println("Connection: close");
+      client.print("Content-Length: ");
+      client.println(json.length());
+      client.println();
+      //client.println(json);
+      client.println(json); // Envia o corpo JSON
+
+      client.stop();
+    } 
+    else {
+      Serial.println("Erro ao conectar com o servidor via GSM");
+    }
+    
     intervaloMsgs = millis();
     queda = false;
   }
